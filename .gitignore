@@ -1,3 +1,24 @@
+# Ignore Python cache and compiled files
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*$py.class
+
+# Ignore common virtualenv folders (optional but helpful)
+.venv/
+venv/
+
+# Ignore data/export files: Excel, CSV, and related
+*.csv
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+
+# Ignore user-specific IDE/editor files (optional)
+.vscode/
+.idea/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -205,3 +226,18 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 忽略办公文档与数据导出文件（Excel / Word / CSV）
+# Excel
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+# CSV
+*.csv
+# Word
+*.doc
+*.docx
+*.docm
+*.dotx
+*.dotm

@@ -275,8 +275,15 @@ def main():
                     col_chart1, col_chart2 = st.columns(2)
                     with col_chart1:
                         st.markdown('<div class="main-card"><h5>🎨 证据画像分布</h5>', unsafe_allow_html=True)
-                        tags_flat = [t for sublist in audit_df['证据链'] for t in sublist if t != '🟢正常']
-                        if not tags_flat: tags_flat = ["🟢正常"]
+                        tags_flat = []
+                        for entry in audit_df['证据链']:
+                            if isinstance(entry, list):
+                                tags_flat.extend([t for t in entry if t != '🟢正常'])
+                            elif isinstance(entry, str):
+                                if entry != '🟢正常':
+                                    tags_flat.append(entry)
+                        if not tags_flat:
+                            tags_flat = ["🟢正常"]
                         tag_counts = pd.Series(tags_flat).value_counts()
                         fig = px.pie(values=tag_counts.values, names=tag_counts.index, hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
                         st.plotly_chart(fig, use_container_width=True)
@@ -322,6 +329,37 @@ def main():
                         - 若呈现**右偏**（高分多），说明题目可能偏简单。
                         """)
 
+                    # --- 时长 vs 成绩 回归拟合与异常值检测 ---
+                    if '时长' in audit_df.columns and '成绩' in audit_df.columns:
+                        x = audit_df['时长']
+                        y = audit_df['成绩']
+                        mask = x.notna() & y.notna()
+                        if mask.sum() > 2:
+                            coeff = np.polyfit(x[mask], y[mask], 1)
+                            trend = np.poly1d(coeff)
+                            fig_fit = px.scatter(audit_df, x='时长', y='成绩', title='时长 vs 成绩 散点与线性拟合', color_discrete_sequence=['#FFB6C1'])
+                            xs = np.linspace(x.min(), x.max(), 50)
+                            fig_fit.add_trace(go.Scatter(x=xs, y=trend(xs), mode='lines', line=dict(color='red', dash='dash'), name='线性拟合'))
+                            st.plotly_chart(fig_fit, use_container_width=True)
+
+                            # 简单异常值检测（z-score）
+                            outliers = pd.DataFrame()
+                            for col in ['时长', '成绩']:
+                                if col in audit_df.columns:
+                                    col_mean = audit_df[col].mean()
+                                    col_std = audit_df[col].std()
+                                    if col_std and not np.isnan(col_std):
+                                        z = (audit_df[col] - col_mean) / col_std
+                                        audit_df[f'{col}_z'] = z
+                            # 标出任一指标 z-score 超过 2 的记录
+                            if any(c.endswith('_z') for c in audit_df.columns):
+                                z_cols = [c for c in audit_df.columns if c.endswith('_z')]
+                                outlier_mask = audit_df[z_cols].abs().max(axis=1) > 2
+                                outliers = audit_df[outlier_mask][['姓名','时长','成绩'] + z_cols]
+                                if not outliers.empty:
+                                    st.markdown('#### ⚠️ 检测到异常值 (任一指标 |z|>2)')
+                                    st.dataframe(outliers.reset_index(drop=True), use_container_width=True)
+
                 with tab2:
                     st.markdown("#### 🧩 学生群体智能聚类")
                     st.caption("基于“投入-产出”模型，自动将学生划分为四大典型群体：")
@@ -364,6 +402,7 @@ def main():
                         output = io.BytesIO()
                         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                             risk_df.drop(columns=['证据链', '主标签']).to_excel(writer, index=False)
+                        output.seek(0)
                         st.download_button("📥 导出诊断报告", output.getvalue(), "异常诊断表.xlsx", use_container_width=True)
                         
                         student_name = st.radio("点击查看详情：", risk_df['姓名'].unique(), key="s_select")
@@ -371,8 +410,26 @@ def main():
                     with col_detail:
                         if student_name:
                             row = risk_df[risk_df['姓名'] == student_name].iloc[0]
-                            tags_html = "".join([f'<span class="tag tag-brush">{t}</span>' if "秒刷" in t else (f'<span class="tag tag-skip">{t}</span>' if "存疑" in t or "未开始" in t else f'<span class="tag tag-pass">{t}</span>') for t in row['证据链'] if t != '🟢正常'])
-                            
+                            # 安全生成标签 HTML（适配 list / str / empty）
+                            entry = row.get('证据链', []) if isinstance(row, (pd.Series, dict)) else row['证据链']
+                            tags_list = []
+                            if isinstance(entry, list):
+                                tags_list = [t for t in entry if t != '🟢正常']
+                            elif isinstance(entry, str):
+                                if entry != '🟢正常':
+                                    tags_list = [entry]
+                            tags_html = ''
+                            for t in tags_list:
+                                if '秒刷' in t:
+                                    cls = 'tag-brush'
+                                elif '存疑' in t or '未开始' in t:
+                                    cls = 'tag-skip'
+                                elif '正常' in t:
+                                    cls = 'tag-none'
+                                else:
+                                    cls = 'tag-pass'
+                                tags_html += f'<span class="tag {cls}">{t}</span>'
+
                             st.markdown(f"""
                             <div class="diagnosis-card">
                                 <h2 style="color:#C71585; margin:0;">👤 {row['姓名']} <span style="font-size:18px; color:#666;">({row['学号']})</span></h2>
@@ -412,13 +469,14 @@ def main():
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                         unfinished_df[['姓名', '学号', '进度', '时长']].to_excel(writer, index=False)
+                    output.seek(0)
                     st.download_button("📥 导出未完结名单", output.getvalue(), "未完结名单.xlsx")
                     
                     unfinished_df['进度条'] = unfinished_df['进度'].apply(lambda x: f'<div style="background:#eee;width:100px;height:8px;border-radius:4px;"><div style="background:#3B82F6;width:{x}px;height:8px;border-radius:4px;"></div></div>')
                     st.write(unfinished_df[['姓名', '学号', '进度', '进度条']].to_html(escape=False, index=False), unsafe_allow_html=True)
 
             # === VIEW 5: 原始表 ===
-            elif "原始数据清洗表" in nav:
+            elif "原始数据表" in nav:
                 st.dataframe(audit_df, use_container_width=True)
 
     else:
