@@ -731,6 +731,162 @@ def main():
                     else:
                         st.info('无进度数据可用于覆盖率计算。')
 
+                    # --- 按章节统计与导出（增强版） ---
+                    st.markdown('#### 🗂️ 按章节统计与导出（含按群体对比与低分清单）')
+                    try:
+                        cols_raw = [str(c).strip() for c in raw_df.columns]
+                        chap_map = {}
+                        for c in cols_raw:
+                            nums = re.findall(r"(\d{1,2})", str(c))
+                            if nums:
+                                ch = nums[0]
+                                chap_map.setdefault(ch, []).append(c)
+
+                        def _parse_duration_min_local(val):
+                            if pd.isna(val):
+                                return None
+                            s = str(val)
+                            h = re.search(r"(\\d+)\\s*[时小时h]", s)
+                            m = re.search(r"(\\d+)\\s*分", s)
+                            ss = re.search(r"(\\d+)\\s*秒", s)
+                            if h or m or ss:
+                                total = 0
+                                if h: total += int(h.group(1)) * 60
+                                if m: total += int(m.group(1))
+                                if ss: total += int(ss.group(1)) / 60
+                                return total
+                            t = re.search(r"(\\d{1,2}):(\\d{2})(?::(\\d{2}))?", s)
+                            if t:
+                                hh = int(t.group(1)); mm = int(t.group(2)); sec = int(t.group(3) or 0)
+                                return hh * 60 + mm + sec / 60
+                            try:
+                                v = float(re.sub(r"[^0-9\\.]+", "", s))
+                                return v
+                            except:
+                                return None
+
+                        chapter_summaries = []
+                        low_perf_examples = []
+                        for ch in sorted(chap_map.keys(), key=lambda x: int(x)):
+                            clist = chap_map[ch]
+                            status_col = None
+                            dur_col = None
+                            score_col = None
+                            for cc in clist:
+                                if any(k in cc for k in ['状', '完成', '通过', '是否', '提交']):
+                                    status_col = cc
+                                if any(k in cc for k in ['时', '耗时', '时长']):
+                                    dur_col = cc
+                                if any(k in cc for k in ['得分', '成绩', '分']):
+                                    score_col = cc
+
+                            attempted_mask = raw_df[clist].notna().any(axis=1)
+                            attempts = int(attempted_mask.sum())
+                            completions = 0
+                            if status_col is not None:
+                                svals = raw_df[status_col].astype(str).fillna('')
+                                completions = int(svals.apply(lambda x: 1 if any(w in x for w in ['通过', '已完成', '完成', '合格', '✓']) else 0).sum())
+
+                            avg_dur = None
+                            if dur_col is not None and dur_col in raw_df.columns:
+                                vals = raw_df[dur_col].apply(_parse_duration_min_local).dropna()
+                                if not vals.empty:
+                                    avg_dur = float(vals.mean())
+
+                            # 章节得分相关的低分/未完成样例（优先使用 score_col，否则用审计表的进度）
+                            examples = []
+                            if score_col is not None and score_col in raw_df.columns:
+                                sseries = pd.to_numeric(raw_df[score_col], errors='coerce')
+                                if not sseries.dropna().empty:
+                                    thr = sseries.mean() - sseries.std()
+                                    low_idx = sseries[sseries < thr].dropna().index.tolist()
+                                    for idx in low_idx[:5]:
+                                        examples.append({'章节': ch, '姓名': raw_df.iloc[idx].get(chap_map[ch][0], ''), '分数列': score_col, '分数': raw_df.iloc[idx].get(score_col)})
+                            else:
+                                if status_col is not None and status_col in raw_df.columns:
+                                    mask_un = raw_df[status_col].astype(str).fillna('').apply(lambda x: not any(w in x for w in ['通过', '已完成', '完成', '合格', '✓']))
+                                    for idx in raw_df[mask_un].index[:5]:
+                                        examples.append({'章节': ch, '姓名': raw_df.iloc[idx].get(chap_map[ch][0], ''), '分数列': status_col, '分数': raw_df.iloc[idx].get(status_col)})
+
+                            completion_rate = (completions / attempts * 100) if attempts > 0 else None
+                            chapter_summaries.append({'章节': ch, '尝试人数': attempts, '完成人数': completions, '完成率(%)': round(completion_rate, 1) if completion_rate is not None else None, '平均时长(分)': round(avg_dur, 1) if avg_dur is not None else None, '示例列': ','.join(clist[:6])})
+                            low_perf_examples.extend(examples)
+
+                        chap_df = pd.DataFrame(chapter_summaries)
+                        if not chap_df.empty:
+                            st.dataframe(chap_df, use_container_width=True)
+                            # 可序列化的章节完成人数柱状图
+                            x_vals = chap_df['章节'].astype(str).tolist()
+                            y_vals = chap_df['完成人数'].fillna(0).astype(int).tolist()
+                            fig_chap = go.Figure(data=[go.Bar(x=x_vals, y=y_vals, marker_color='#FFB6C1')])
+                            fig_chap.update_layout(title='各章节完成人数', xaxis_title='章节', yaxis_title='完成人数')
+                            st.plotly_chart(fig_chap, use_container_width=True)
+
+                            # 低分/未完结示例
+                            if low_perf_examples:
+                                st.markdown('**每章低分 / 未完结示例（最多各章前5）**')
+                                st.table(pd.DataFrame(low_perf_examples).head(20))
+
+                            # 若存在学习群体，则做按群体的章节通过率对比矩阵
+                            if '学习群体' in audit_df.columns:
+                                pivot_rows = []
+                                for ch in chap_df['章节'].astype(str).tolist():
+                                    clist = chap_map.get(ch, [])
+                                    status_col = next((c for c in clist if any(k in c for k in ['状', '完成', '通过', '是否', '提交'])), None)
+                                    if status_col is None or status_col not in raw_df.columns:
+                                        continue
+                                    tmp = raw_df[[status_col]].copy()
+                                    tmp['学习群体'] = audit_df['学习群体'] if '学习群体' in audit_df.columns else '未知'
+                                    tmp['完成'] = tmp[status_col].astype(str).fillna('').apply(lambda x: 1 if any(w in x for w in ['通过', '已完成', '完成', '合格', '✓']) else 0)
+                                    grp = tmp.groupby('学习群体')['完成'].mean().mul(100).round(1).rename(ch)
+                                    pivot_rows.append(grp)
+                                if pivot_rows:
+                                    pivot_df = pd.concat(pivot_rows, axis=1).fillna(0)
+                                    st.markdown('**按学习群体的章节通过率对比（%）**')
+                                    st.dataframe(pivot_df, use_container_width=True)
+                                    out_grp = io.BytesIO()
+                                    with pd.ExcelWriter(out_grp, engine='xlsxwriter') as writer:
+                                        pivot_df.to_excel(writer, sheet_name='群体章节通过率')
+                                    out_grp.seek(0)
+                                    st.download_button('📥 导出群体章节通过率矩阵', out_grp.getvalue(), '群体章节通过率.xlsx')
+
+                            # 导出章节汇总与全表（含注：已移除列表/emoji 写入问题）
+                            out = io.BytesIO()
+                            with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
+                                chap_df.to_excel(writer, index=False, sheet_name='章节汇总')
+                                audit_copy = audit_df.copy()
+                                if '证据链' in audit_copy.columns:
+                                    audit_copy['证据链'] = audit_copy['证据链'].apply(lambda x: ','.join(x) if isinstance(x, list) else (str(x) if pd.notna(x) else ''))
+                                audit_copy.to_excel(writer, index=False, sheet_name='全班明细')
+
+                                # 写入每章明细为单独 sheet（包括状态/得分/时长），限长 sheet 名称
+                                for ch in sorted(chap_map.keys(), key=lambda x: int(x)):
+                                    clist = chap_map.get(ch, [])
+                                    status_col = next((c for c in clist if any(k in c for k in ['状', '完成', '通过', '是否', '提交'])), None)
+                                    score_col = next((c for c in clist if any(k in c for k in ['得分', '成绩', '分'])), None)
+                                    dur_col = next((c for c in clist if any(k in c for k in ['时', '耗时', '时长'])), None)
+                                    rows = []
+                                    for i in raw_df.index:
+                                        name = audit_df.at[i, '姓名'] if '姓名' in audit_df.columns else (raw_df.iloc[i][clist[0]] if clist else '')
+                                        sid = audit_df.at[i, '学号'] if '学号' in audit_df.columns else ''
+                                        st_val = raw_df.at[i, status_col] if (status_col in raw_df.columns) else ''
+                                        sc = raw_df.at[i, score_col] if (score_col in raw_df.columns) else ''
+                                        dur = raw_df.at[i, dur_col] if (dur_col in raw_df.columns) else ''
+                                        rows.append({'姓名': name, '学号': sid, '章节状态': st_val, '章节得分': sc, '章节时长原始': dur})
+                                    df_ch = pd.DataFrame(rows)
+                                    sheet_name = f'章{ch}_详情'
+                                    try:
+                                        df_ch.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+                                    except Exception:
+                                        df_ch.to_excel(writer, index=False, sheet_name=f'章{ch}'[:31])
+
+                            out.seek(0)
+                            st.download_button('📥 导出按章节汇总与明细', out.getvalue(), '章节汇总.xlsx')
+                        else:
+                            st.info('未检测到章节列或章节统计为空。')
+                    except Exception as e:
+                        st.error(f'章节统计出错: {e}')
+
             # === VIEW 3: 异常数据分栏 (修复版) ===
             elif "异常数据分栏" in nav:
                 st.markdown("### 🚨 异常行为诊断中心")
