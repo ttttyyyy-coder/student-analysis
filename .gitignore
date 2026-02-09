@@ -9,12 +9,8 @@ __pycache__/
 .venv/
 venv/
 
-# Ignore data/export files: Excel, CSV, and related
-*.csv
-*.xls
-*.xlsx
-*.xlsm
-*.xlsb
+# 数据文件（Excel/CSV）默认不再被忽略，方便在工作区进行分析与版本管理。
+# 如需忽略某些敏感导出文件，请在本地或全局 `.gitignore` 中手动添加对应规则。
 
 # Ignore user-specific IDE/editor files (optional)
 .vscode/
@@ -227,17 +223,4 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# 忽略办公文档与数据导出文件（Excel / Word / CSV）
-# Excel
-*.xls
-*.xlsx
-*.xlsm
-*.xlsb
-# CSV
-*.csv
-# Word
-*.doc
-*.docx
-*.docm
-*.dotx
-*.dotm
+# （保留：办公文档请按需在本地 .gitignore 中配置）
