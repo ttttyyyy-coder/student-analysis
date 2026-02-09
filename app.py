@@ -142,6 +142,45 @@ class AuditCore:
         elif '时' in s: return float(nums[0]) * 60
         else: return float(nums[0])
 
+    def _parse_progress_value(self, val):
+        """Parse a single progress value into 0-100 float.
+        Supports formats: '40%', '0.4', '40', '3/5', '40/40', numeric strings, and None.
+        """
+        if pd.isna(val):
+            return 0.0
+        s = str(val).strip()
+        if s in ['', '--', '-']:
+            return 0.0
+        # fraction like 3/5 or 10/10
+        m = re.search(r"^(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)$", s)
+        if m:
+            try:
+                num = float(m.group(1)); den = float(m.group(2))
+                return 100.0 * (num / den) if den != 0 else 0.0
+            except:
+                return 0.0
+        # percentage
+        if '%' in s:
+            try:
+                return float(s.replace('%', '').strip())
+            except:
+                pass
+        # plain number
+        try:
+            v = float(s)
+            # if in 0..1 treat as fraction
+            if 0.0 <= v <= 1.0:
+                return v * 100.0
+            # if >1 and <=100 assume percent already
+            if 1.0 < v <= 1000.0:
+                return v
+        except:
+            pass
+        return 0.0
+
+    def _parse_progress_series(self, series):
+        return series.apply(self._parse_progress_value).fillna(0.0).astype(float)
+
     def execute_audit(self, mode="LMS", detect_night=True, night_window=(0,5)):
         c = self.cols
         if 'name' not in c: return None, "表格中未找到【姓名】列"
@@ -151,8 +190,9 @@ class AuditCore:
         res['学号'] = self.df[c['id']] if 'id' in c else "未知"
         
         if 'prog' in c:
-            raw_p = pd.to_numeric(self.df[c['prog']], errors='coerce').fillna(0)
-            res['进度'] = raw_p * 100 if raw_p.max() <= 1.1 else raw_p
+            raw_p = self._parse_progress_series(self.df[c['prog']])
+            # parsed into 0-100
+            res['进度'] = raw_p.clip(0, 100)
         else: res['进度'] = 0.0
         
         res['时长'] = self.df[c['time']].apply(self._parse_time) if 'time' in c else 0.0
@@ -860,6 +900,8 @@ def main():
                                 audit_copy.to_excel(writer, index=False, sheet_name='全班明细')
 
                                 # 写入每章明细为单独 sheet（包括状态/得分/时长），限长 sheet 名称
+                                low_perf_all = []
+                                unfin_all = []
                                 for ch in sorted(chap_map.keys(), key=lambda x: int(x)):
                                     clist = chap_map.get(ch, [])
                                     status_col = next((c for c in clist if any(k in c for k in ['状', '完成', '通过', '是否', '提交'])), None)
@@ -873,12 +915,46 @@ def main():
                                         sc = raw_df.at[i, score_col] if (score_col in raw_df.columns) else ''
                                         dur = raw_df.at[i, dur_col] if (dur_col in raw_df.columns) else ''
                                         rows.append({'姓名': name, '学号': sid, '章节状态': st_val, '章节得分': sc, '章节时长原始': dur})
+                                        # collect low-perf and unfin
+                                        if score_col in raw_df.columns:
+                                            try:
+                                                s_val = float(re.sub(r"[^0-9\.]+", "", str(raw_df.at[i, score_col])))
+                                            except:
+                                                s_val = None
+                                            # low if significantly below mean (will be filtered later if mean available)
+                                            low_perf_all.append({'章节': ch, '姓名': name, '学号': sid, '分数': s_val})
+                                        if status_col in raw_df.columns:
+                                            is_unfin = False
+                                            sval = str(raw_df.at[i, status_col])
+                                            if not any(w in sval for w in ['通过', '已完成', '完成', '合格', '✓']):
+                                                is_unfin = True
+                                            if is_unfin:
+                                                unfin_all.append({'章节': ch, '姓名': name, '学号': sid, '状态原文': sval})
                                     df_ch = pd.DataFrame(rows)
                                     sheet_name = f'章{ch}_详情'
                                     try:
                                         df_ch.to_excel(writer, index=False, sheet_name=sheet_name[:31])
                                     except Exception:
                                         df_ch.to_excel(writer, index=False, sheet_name=f'章{ch}'[:31])
+                                # post-process low_perf_all to pick truly low entries per chapter
+                                low_df = pd.DataFrame(low_perf_all)
+                                if not low_df.empty:
+                                    # compute per-chapter threshold mean-std
+                                    low_filtered = []
+                                    for ch, g in low_df.groupby('章节'):
+                                        vals = g['分数'].dropna().astype(float)
+                                        if vals.empty:
+                                            continue
+                                        thr = vals.mean() - vals.std()
+                                        sel = g[g['分数'].astype(float) < thr]
+                                        for _, r in sel.iterrows():
+                                            low_filtered.append(r.to_dict())
+                                    low_out = pd.DataFrame(low_filtered)
+                                    if not low_out.empty:
+                                        low_out.to_excel(writer, index=False, sheet_name='章节低分名单')
+                                unfin_df = pd.DataFrame(unfin_all)
+                                if not unfin_df.empty:
+                                    unfin_df.to_excel(writer, index=False, sheet_name='章节未完结名单')
 
                             out.seek(0)
                             st.download_button('📥 导出按章节汇总与明细', out.getvalue(), '章节汇总.xlsx')
