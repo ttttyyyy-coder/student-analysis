@@ -717,7 +717,14 @@ def main():
                         audit_df['进度区间'] = pd.cut(audit_df['进度'].fillna(0), bins=bins, include_lowest=True, right=False)
                         cov_grp = audit_df.groupby('进度区间').size().reset_index(name='人数')
                         cov_grp['占比'] = (cov_grp['人数'] / cov_grp['人数'].sum() * 100).round(1)
-                        fig_cov = px.bar(cov_grp, x='进度区间', y='人数', title='学习路径覆盖：进度区间人数分布', text='占比', color_discrete_sequence=['#7DD3FC'])
+                        # 将区间转换为字符串以避免 Plotly JSON 序列化错误
+                        cov_grp['进度区间'] = cov_grp['进度区间'].astype(str)
+                        # 使用 Plotly Graph Objects，确保传入的 x/y/text 为原生 Python 列表，避免序列化错误
+                        x_vals = cov_grp['进度区间'].astype(str).tolist()
+                        y_vals = cov_grp['人数'].tolist()
+                        text_vals = cov_grp['占比'].astype(str).tolist()
+                        fig_cov = go.Figure(data=[go.Bar(x=x_vals, y=y_vals, text=text_vals, marker_color='#7DD3FC')])
+                        fig_cov.update_layout(title='学习路径覆盖：进度区间人数分布', xaxis_title='进度区间', yaxis_title='人数')
                         st.plotly_chart(fig_cov, use_container_width=True)
                         st.markdown('**进度覆盖表**')
                         st.table(cov_grp)
